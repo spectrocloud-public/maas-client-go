@@ -34,6 +34,7 @@ type authenticatedClient struct {
 	baseURL    string
 	httpClient *http.Client
 	apiKey     string
+	limiter    *rateLimiter
 }
 
 type Client interface {
@@ -57,6 +58,12 @@ func (c *authenticatedClient) Get(ctx context.Context, path string, params url.V
 	}
 	req.URL.RawQuery = params.Encode()
 
+	// Wait for the limiter before signing: the OAuth header embeds the
+	// signing time, which can expire while a request queues.
+	if err := c.limiter.wait(ctx); err != nil {
+		return nil, err
+	}
+
 	req.Header.Set("Accept", "application/json; charset=utf-8")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", authHeader(req, params, c.apiKey))
@@ -72,6 +79,10 @@ func (c *authenticatedClient) Post(ctx context.Context, path string, params url.
 		strings.NewReader(params.Encode()),
 	)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := c.limiter.wait(ctx); err != nil {
 		return nil, err
 	}
 
@@ -91,6 +102,10 @@ func (c *authenticatedClient) PostForm(ctx context.Context, path string, content
 		body,
 	)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := c.limiter.wait(ctx); err != nil {
 		return nil, err
 	}
 
@@ -134,6 +149,9 @@ func (c *authenticatedClient) Put(ctx context.Context, path string, params url.V
 	if err != nil {
 		return nil, err
 	}
+	if err := c.limiter.wait(ctx); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Accept", "application/json; charset=utf-8")
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Authorization", authHeader(req, params, c.apiKey))
@@ -152,6 +170,9 @@ func (c *authenticatedClient) PutParams(ctx context.Context, path string, params
 	if err != nil {
 		return nil, err
 	}
+	if err := c.limiter.wait(ctx); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Accept", "application/json; charset=utf-8")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", authHeader(req, params, c.apiKey))
@@ -167,6 +188,10 @@ func (c *authenticatedClient) Delete(ctx context.Context, path string, params ur
 		strings.NewReader(params.Encode()),
 	)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := c.limiter.wait(ctx); err != nil {
 		return nil, err
 	}
 
@@ -276,6 +301,7 @@ func NewAuthenticatedClientSet(maasEndpoint, apiKey string, options ...func(clie
 		apiKey:     apiKey,
 		httpClient: httpClient,
 		baseURL:    fmt.Sprintf("%s/api/2.0", maasEndpoint),
+		limiter:    newRateLimiter(5, 10),
 	}
 
 	clientSet := &authenticatedClientSet{
@@ -309,6 +335,14 @@ func NewAuthenticatedClientSet(maasEndpoint, apiKey string, options ...func(clie
 func (m *authenticatedClientSet) WithHTTPClient(client *http.Client) ClientSetInterface {
 	m.client.httpClient = client
 	return m
+}
+
+// WithRateLimit sets the per-instance MAAS request rate. qps <= 0 disables the
+// limiter. The default is 5 requests/second with a burst of 10.
+func WithRateLimit(qps float64, burst int) func(*authenticatedClientSet) {
+	return func(c *authenticatedClientSet) {
+		c.client.limiter = newRateLimiter(qps, burst)
+	}
 }
 
 func authHeader(req *http.Request, queryParams url.Values, apiKey string) string {

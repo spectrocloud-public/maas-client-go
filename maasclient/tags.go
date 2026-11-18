@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 )
 
@@ -35,6 +36,9 @@ type Tags interface {
 	Assign(ctx context.Context, tagName string, systemID string) error
 	// Unassign removes the given tag name from the provided machine system ID
 	Unassign(ctx context.Context, tagName string, systemID string) error
+	// Delete deletes the tag definition, which also unassigns it from every
+	// machine. A 404 counts as done.
+	Delete(ctx context.Context, tagName string) error
 }
 
 type Tag interface {
@@ -95,6 +99,22 @@ func (ds *tags) Unassign(ctx context.Context, tagName string, systemID string) e
 	path := fmt.Sprintf("%s%s/op-update_nodes", ds.apiPath, url.PathEscape(tagName))
 	_, err := ds.client.Post(ctx, path, params)
 	return err
+}
+
+func (ds *tags) Delete(ctx context.Context, tagName string) error {
+	if tagName == "" {
+		return nil
+	}
+	path := fmt.Sprintf("%s%s/", ds.apiPath, url.PathEscape(tagName))
+	resp, err := ds.client.Delete(ctx, path, url.Values{})
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		_ = resp.Body.Close()
+		return nil
+	}
+	return unMarshalJson(resp, nil)
 }
 
 func tagsStructSliceToInterface(in []*tag, client Client) []Tag {

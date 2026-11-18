@@ -19,8 +19,10 @@ package maasclient
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // VMHosts interface for managing VM hosts collection
@@ -35,6 +37,7 @@ type VMHost interface {
 	Get(ctx context.Context) (VMHost, error)
 	Update(ctx context.Context, params Params) (VMHost, error)
 	Delete(ctx context.Context) error
+	Refresh(ctx context.Context) (VMHost, error)
 
 	// VM Host specific operations
 	Composer() VMComposer
@@ -72,6 +75,9 @@ type VMComposer interface {
 // VMHostMachines interface for managing machines on a VM host
 type VMHostMachines interface {
 	List(ctx context.Context) ([]Machine, error)
+	// ListPopulated returns the vm-host's machines with their details
+	// (tags, state, parent) without one GET per machine.
+	ListPopulated(ctx context.Context) ([]Machine, error)
 }
 
 // vmHosts implements VMHosts interface following the Controller pattern
@@ -95,7 +101,8 @@ type vmComposer struct {
 // vmHostMachines implements VMHostMachines interface
 type vmHostMachines struct {
 	Controller
-	systemID string
+	systemID     string
+	hostSystemID string
 }
 
 // NewVMHostsClient creates a new VMHosts client
@@ -220,6 +227,30 @@ func (c *vmHost) Delete(ctx context.Context) error {
 	return err
 }
 
+// Refresh asks MAAS to refresh the vm-host and its resources.
+func (c *vmHost) Refresh(ctx context.Context) (VMHost, error) {
+	params := ParamsBuilder().Set(Operation, OperationRefreshVMHost)
+	resp, err := c.client.Post(ctx, c.apiPath, params.Values())
+	if err != nil {
+		return nil, err
+	}
+
+	var vmHostData vmHostDetails
+	if err := unMarshalJson(resp, &vmHostData); err != nil {
+		return nil, err
+	}
+
+	systemID := c.systemID
+	if vmHostData.ID != 0 {
+		systemID = strconv.Itoa(vmHostData.ID)
+	}
+	return &vmHost{
+		Controller: c.Controller,
+		systemID:   systemID,
+		data:       vmHostData,
+	}, nil
+}
+
 func (c *vmHost) Composer() VMComposer {
 	return &vmComposer{
 		Controller: Controller{
@@ -238,7 +269,8 @@ func (c *vmHost) Machines() VMHostMachines {
 			apiPath: fmt.Sprintf("/vm-hosts/%s/machines/", c.systemID),
 			params:  ParamsBuilder(),
 		},
-		systemID: c.systemID,
+		systemID:     c.systemID,
+		hostSystemID: c.data.Host.SystemID,
 	}
 }
 
@@ -268,22 +300,105 @@ func (c *vmComposer) Compose(ctx context.Context, params Params) (Machine, error
 
 // Implementation of VMHostMachines interface
 func (c *vmHostMachines) List(ctx context.Context) ([]Machine, error) {
-	resp, err := c.client.Get(ctx, c.apiPath, url.Values{})
+	machines, err := c.list(ctx)
 	if err != nil {
 		return nil, err
 	}
+	machinesClient := NewMachinesClient(c.client.(*authenticatedClient))
+	result := make([]Machine, 0, len(machines))
+	for _, m := range machines {
+		result = append(result, machinesClient.Machine(m.systemID))
+	}
+	return result, nil
+}
 
-	var machinesData []machineDetails
-	if err := unMarshalJson(resp, &machinesData); err != nil {
+// list fetches the vm-host's machines. MAAS versions that expose
+// /vm-hosts/{id}/machines/ return them directly; older versions return 404,
+// so fall back to the populated /machines/ list and filter by Parent().
+func (c *vmHostMachines) list(ctx context.Context) ([]*machine, error) {
+	resp, err := c.client.Get(ctx, c.apiPath, url.Values{})
+	if err == nil {
+		if resp.StatusCode == http.StatusNotFound {
+			_ = resp.Body.Close()
+			return c.listByParent(ctx)
+		}
+		var machinesData []*machine
+		if uerr := unMarshalJson(resp, &machinesData); uerr != nil {
+			return nil, uerr
+		}
+		c.attach(machinesData)
+		return machinesData, nil
+	}
+	if !isUnknownVMHostMachinesEndpoint(err) {
 		return nil, err
 	}
+	return c.listByParent(ctx)
+}
 
-	var result []Machine
-	machinesClient := NewMachinesClient(c.client.(*authenticatedClient))
-	for _, machineData := range machinesData {
-		result = append(result, machinesClient.Machine(machineData.SystemID))
+func (c *vmHostMachines) listByParent(ctx context.Context) ([]*machine, error) {
+	hostSystemID := c.hostSystemID
+	if hostSystemID == "" {
+		resp, err := c.client.Get(ctx, fmt.Sprintf("/vm-hosts/%s/", c.systemID), url.Values{})
+		if err != nil {
+			return nil, err
+		}
+		var data vmHostDetails
+		if err := unMarshalJson(resp, &data); err != nil {
+			return nil, err
+		}
+		hostSystemID = data.Host.SystemID
+	}
+	if hostSystemID == "" {
+		return nil, fmt.Errorf("vm-host %s has no host system id", c.systemID)
 	}
 
+	resp, err := c.client.Get(ctx, "/machines/", url.Values{})
+	if err != nil {
+		return nil, err
+	}
+	var all []*machine
+	if err := unMarshalJson(resp, &all); err != nil {
+		return nil, err
+	}
+	result := make([]*machine, 0)
+	for _, m := range all {
+		// Compare the decoded parent directly: Parent() is intentionally
+		// LXD-only, while vm-hosts also back virsh guests.
+		if m.parentSystemID == hostSystemID {
+			result = append(result, m)
+		}
+	}
+	c.attach(result)
+	return result, nil
+}
+
+func (c *vmHostMachines) attach(machines []*machine) {
+	for _, m := range machines {
+		m.client = c.client
+		m.apiPath = fmt.Sprintf("/machines/%s/", m.systemID)
+		m.params = ParamsBuilder()
+	}
+}
+
+func isUnknownVMHostMachinesEndpoint(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "status: 404") || strings.Contains(msg, "unknown api endpoint")
+}
+
+// ListPopulated returns the vm-host's machines with the details MAAS already
+// included in the list response, avoiding one GET per machine.
+func (c *vmHostMachines) ListPopulated(ctx context.Context) ([]Machine, error) {
+	machines, err := c.list(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Machine, 0, len(machines))
+	for _, m := range machines {
+		result = append(result, m)
+	}
 	return result, nil
 }
 
