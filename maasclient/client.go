@@ -34,6 +34,7 @@ type authenticatedClient struct {
 	baseURL    string
 	httpClient *http.Client
 	apiKey     string
+	limiter    *rateLimiter
 }
 
 type Client interface {
@@ -177,6 +178,9 @@ func (c *authenticatedClient) Delete(ctx context.Context, path string, params ur
 }
 
 func (c *authenticatedClient) dispatchRequest(req *http.Request) (*http.Response, error) {
+	if err := c.limiter.wait(req.Context()); err != nil {
+		return nil, err
+	}
 	return c.httpClient.Do(req)
 }
 
@@ -276,6 +280,7 @@ func NewAuthenticatedClientSet(maasEndpoint, apiKey string, options ...func(clie
 		apiKey:     apiKey,
 		httpClient: httpClient,
 		baseURL:    fmt.Sprintf("%s/api/2.0", maasEndpoint),
+		limiter:    newRateLimiter(5, 10),
 	}
 
 	clientSet := &authenticatedClientSet{
@@ -309,6 +314,14 @@ func NewAuthenticatedClientSet(maasEndpoint, apiKey string, options ...func(clie
 func (m *authenticatedClientSet) WithHTTPClient(client *http.Client) ClientSetInterface {
 	m.client.httpClient = client
 	return m
+}
+
+// WithRateLimit sets the per-instance MAAS request rate. qps <= 0 disables the
+// limiter. The default is 5 requests/second with a burst of 10.
+func WithRateLimit(qps float64, burst int) func(*authenticatedClientSet) {
+	return func(c *authenticatedClientSet) {
+		c.client.limiter = newRateLimiter(qps, burst)
+	}
 }
 
 func authHeader(req *http.Request, queryParams url.Values, apiKey string) string {
