@@ -78,4 +78,6 @@ const (
 	OperationUnlinkSubnet     = "unlink_subnet"
 	OperationCreateBridge     = "create_bridge"
 	OperationReleaseIPAddress = "release"
+	OperationRefreshVMHost    = "refresh"
+	OperationMarkBroken       = "mark_broken"
 )
