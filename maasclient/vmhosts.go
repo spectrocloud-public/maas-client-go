@@ -35,6 +35,7 @@ type VMHost interface {
 	Get(ctx context.Context) (VMHost, error)
 	Update(ctx context.Context, params Params) (VMHost, error)
 	Delete(ctx context.Context) error
+	Refresh(ctx context.Context) (VMHost, error)
 
 	// VM Host specific operations
 	Composer() VMComposer
@@ -72,6 +73,9 @@ type VMComposer interface {
 // VMHostMachines interface for managing machines on a VM host
 type VMHostMachines interface {
 	List(ctx context.Context) ([]Machine, error)
+	// ListPopulated returns the vm-host's machines with their details
+	// (tags, state, parent) without one GET per machine.
+	ListPopulated(ctx context.Context) ([]Machine, error)
 }
 
 // vmHosts implements VMHosts interface following the Controller pattern
@@ -220,6 +224,30 @@ func (c *vmHost) Delete(ctx context.Context) error {
 	return err
 }
 
+// Refresh asks MAAS to refresh the vm-host and its resources.
+func (c *vmHost) Refresh(ctx context.Context) (VMHost, error) {
+	params := ParamsBuilder().Set(Operation, OperationRefreshVMHost)
+	resp, err := c.client.Post(ctx, c.apiPath, params.Values())
+	if err != nil {
+		return nil, err
+	}
+
+	var vmHostData vmHostDetails
+	if err := unMarshalJson(resp, &vmHostData); err != nil {
+		return nil, err
+	}
+
+	systemID := c.systemID
+	if vmHostData.ID != 0 {
+		systemID = strconv.Itoa(vmHostData.ID)
+	}
+	return &vmHost{
+		Controller: c.Controller,
+		systemID:   systemID,
+		data:       vmHostData,
+	}, nil
+}
+
 func (c *vmHost) Composer() VMComposer {
 	return &vmComposer{
 		Controller: Controller{
@@ -284,6 +312,29 @@ func (c *vmHostMachines) List(ctx context.Context) ([]Machine, error) {
 		result = append(result, machinesClient.Machine(machineData.SystemID))
 	}
 
+	return result, nil
+}
+
+// ListPopulated returns the vm-host's machines with the details MAAS already
+// included in the list response, avoiding one GET per machine.
+func (c *vmHostMachines) ListPopulated(ctx context.Context) ([]Machine, error) {
+	resp, err := c.client.Get(ctx, c.apiPath, url.Values{})
+	if err != nil {
+		return nil, err
+	}
+
+	var machinesData []*machine
+	if err := unMarshalJson(resp, &machinesData); err != nil {
+		return nil, err
+	}
+
+	result := make([]Machine, 0, len(machinesData))
+	for _, m := range machinesData {
+		m.client = c.client
+		m.apiPath = fmt.Sprintf("/machines/%s/", m.systemID)
+		m.params = ParamsBuilder()
+		result = append(result, m)
+	}
 	return result, nil
 }
 

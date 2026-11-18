@@ -34,6 +34,7 @@ type Machines interface {
 type Machine interface {
 	Get(ctx context.Context) (Machine, error)
 	Delete(ctx context.Context) error
+	MarkBroken(ctx context.Context, comment string) (Machine, error)
 	Releaser() MachineReleaser
 	Modifier() MachineModifier
 	Deployer() MachineDeployer
@@ -398,6 +399,20 @@ func (m *machine) Delete(ctx context.Context) error {
 	}
 
 	return unMarshalJson(res, nil)
+}
+
+// MarkBroken marks the machine Broken with an optional comment.
+func (m *machine) MarkBroken(ctx context.Context, comment string) (Machine, error) {
+	m.params.Reset()
+	m.params.Set(Operation, OperationMarkBroken)
+	if comment != "" {
+		m.params.Set(CommentKey, comment)
+	}
+	res, err := m.client.Post(ctx, m.apiPath, m.params.Values())
+	if err != nil {
+		return m, err
+	}
+	return m, unMarshalJson(res, &m)
 }
 
 func (m *machine) Release(ctx context.Context) (Machine, error) {
