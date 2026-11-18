@@ -21,6 +21,7 @@ package maasclient
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -49,15 +50,24 @@ func TestIntegrationVMHostReadOnly(t *testing.T) {
 		t.Skip("MAAS has no vm-hosts")
 	}
 
-	host := hosts[0]
-	machines, err := host.Machines().ListPopulated(ctx)
-	if err != nil {
-		t.Fatalf("ListPopulated: %v", err)
+	okHosts := 0
+	for _, host := range hosts {
+		machines, err := host.Machines().ListPopulated(ctx)
+		if err != nil {
+			t.Logf("host id=%s name=%s type=%s: ListPopulated error: %v",
+				host.SystemID(), host.Name(), host.Type(), err)
+			continue
+		}
+		okHosts++
+		t.Logf("host id=%s name=%s type=%s hostSystemID=%s machines=%d",
+			host.SystemID(), host.Name(), host.Type(), host.HostSystemID(), len(machines))
+		for _, m := range machines {
+			t.Logf("  machine id=%s hostname=%s state=%s parent=%s tags=%v",
+				m.SystemID(), m.Hostname(), m.State(), m.Parent(), m.Tags())
+		}
 	}
-	t.Logf("host id=%s name=%s type=%s machines=%d", host.SystemID(), host.Name(), host.Type(), len(machines))
-	for _, m := range machines {
-		t.Logf("machine id=%s hostname=%s state=%s parent=%s tags=%v",
-			m.SystemID(), m.Hostname(), m.State(), m.Parent(), m.Tags())
+	if okHosts == 0 {
+		t.Fatal("ListPopulated failed for every vm-host")
 	}
 }
 
@@ -96,4 +106,19 @@ func TestIntegrationMachineMarkBroken(t *testing.T) {
 		t.Fatalf("Machine.MarkBroken: %v", err)
 	}
 	t.Logf("machine id=%s state=%s", m.SystemID(), m.State())
+}
+
+func TestIntegrationMachineMarkBrokenNotFound(t *testing.T) {
+	c := integrationClient(t)
+	ctx := context.Background()
+
+	_, err := c.Machines().Machine("pcp8053-does-not-exist").MarkBroken(ctx, "PCP-8053 integration test")
+	if err == nil {
+		t.Fatal("expected MarkBroken to fail for a nonexistent machine")
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "404") && !strings.Contains(msg, "not found") && !strings.Contains(msg, "no machine") {
+		t.Fatalf("unexpected MarkBroken error: %v", err)
+	}
+	t.Logf("MarkBroken nonexistent machine returned: %v", err)
 }

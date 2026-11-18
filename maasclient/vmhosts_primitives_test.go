@@ -106,3 +106,36 @@ func TestMachineMarkBroken(t *testing.T) {
 		t.Fatalf("machine = %+v", m)
 	}
 }
+
+func TestVMHostMachinesListPopulatedFallback(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/2.0/vm-hosts/7/machines/":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Unknown API endpoint"}`))
+		case r.URL.Path == "/api/2.0/vm-hosts/7/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":7,"name":"host-7","type":"lxd","host":{"system_id":"host-7"}}`))
+		case r.URL.Path == "/api/2.0/machines/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"system_id":"vm1","hostname":"vm-1","power_type":"lxd","status_name":"Deployed","tags":["maas-lxd-wlc-cp"],"parent":{"system_id":"host-7"}},
+				{"system_id":"vm2","hostname":"vm-2","power_type":"lxd","status_name":"Deployed","parent":{"system_id":"other-host"}}
+			]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	machines, err := c.VMHosts().VMHost("7").Machines().ListPopulated(context.Background())
+	if err != nil {
+		t.Fatalf("ListPopulated fallback: %v", err)
+	}
+	if len(machines) != 1 {
+		t.Fatalf("machines = %d, want 1", len(machines))
+	}
+	m := machines[0]
+	if m.SystemID() != "vm1" || m.Parent() != "host-7" || m.Hostname() != "vm-1" {
+		t.Fatalf("machine = %+v", m)
+	}
+}
