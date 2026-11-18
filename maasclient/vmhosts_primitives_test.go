@@ -85,17 +85,56 @@ func TestVMHostMachinesListPopulated(t *testing.T) {
 	}
 }
 
-func TestMachineMarkBroken(t *testing.T) {
+func TestVMHostMachinesListByParentIncludesVirsh(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/2.0/machines/abc/" {
+		switch r.URL.Path {
+		case "/api/2.0/vm-hosts/7/machines/":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Unknown API endpoint"}`))
+		case "/api/2.0/vm-hosts/7/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":7,"name":"host-7","type":"virsh","host":{"system_id":"host-7"}}`))
+		case "/api/2.0/machines/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"system_id":"vm1","hostname":"vm-1","power_type":"virsh","status_name":"Deployed","parent":{"system_id":"host-7"}},
+				{"system_id":"vm2","hostname":"vm-2","power_type":"lxd","status_name":"Deployed","parent":{"system_id":"other-host"}}
+			]`))
+		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), "op=mark_broken") || !strings.Contains(string(body), "comment=dead+host") {
-			t.Errorf("body = %s", body)
+	})
+
+	machines, err := c.VMHosts().VMHost("7").Machines().List(context.Background())
+	if err != nil {
+		t.Fatalf("List fallback: %v", err)
+	}
+	if len(machines) != 1 || machines[0].SystemID() != "vm1" {
+		t.Fatalf("machines = %+v, want only virsh guest vm1", machines)
+	}
+}
+
+func TestMachineMarkBroken(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/2.0/machines/abc/" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"system_id":"abc","hostname":"host","status_name":"Broken","power_type":"ipmi","comment":"dead host"}`))
+		switch r.Method {
+		case http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			if !strings.Contains(string(body), "op=mark_broken") || !strings.Contains(string(body), "comment=dead+host") {
+				t.Errorf("body = %s", body)
+			}
+			_, _ = w.Write([]byte(`{"system_id":"abc","hostname":"host","status_name":"Broken","power_type":"ipmi","comment":"dead host"}`))
+		case http.MethodGet:
+			if r.URL.RawQuery != "" {
+				t.Errorf("Get after MarkBroken sent query %q, want none", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"system_id":"abc","hostname":"host","status_name":"Broken","power_type":"ipmi"}`))
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
 	})
 
 	m, err := c.Machines().Machine("abc").MarkBroken(context.Background(), "dead host")
@@ -104,6 +143,11 @@ func TestMachineMarkBroken(t *testing.T) {
 	}
 	if m.SystemID() != "abc" || m.State() != "Broken" {
 		t.Fatalf("machine = %+v", m)
+	}
+
+	// MarkBroken's POST-only parameters must not leak into a later read.
+	if _, err := m.Get(context.Background()); err != nil {
+		t.Fatalf("Get after MarkBroken: %v", err)
 	}
 }
 

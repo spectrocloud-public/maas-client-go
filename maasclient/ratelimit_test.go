@@ -18,6 +18,9 @@ package maasclient
 
 import (
 	"context"
+	"net/http"
+	"regexp"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -62,5 +65,37 @@ func TestRateLimiterWaitHonorsContext(t *testing.T) {
 	defer cancel()
 	if err := l.wait(deadline); err == nil {
 		t.Fatal("expected the second wait to hit the context deadline")
+	}
+}
+
+func TestRateLimiterWaitsBeforeSigning(t *testing.T) {
+	start := time.Now()
+	var signedAt int64
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		m := regexp.MustCompile(`oauth_timestamp="(\d+)"`).FindStringSubmatch(r.Header.Get("Authorization"))
+		if len(m) != 2 {
+			t.Fatalf("missing oauth_timestamp in %q", r.Header.Get("Authorization"))
+		}
+		signedAt, _ = strconv.ParseInt(m[1], 10, 64)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	})
+	cs := c.(*authenticatedClientSet)
+	// 0.4 qps with a burst of 1: the second request queues for 2.5s.
+	cs.client.limiter = newRateLimiter(0.4, 1)
+	if err := cs.client.limiter.wait(context.Background()); err != nil {
+		t.Fatalf("drain limiter: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := cs.client.Get(ctx, "/machines/", nil); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// The OAuth header is built after the wait, so its timestamp cannot be
+	// older than the queued interval.
+	if signedAt < start.Add(2*time.Second).Unix() {
+		t.Fatalf("signed at %d, before the 2.5s wait starting at %d", signedAt, start.Unix())
 	}
 }

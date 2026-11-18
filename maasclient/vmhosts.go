@@ -362,7 +362,9 @@ func (c *vmHostMachines) listByParent(ctx context.Context) ([]*machine, error) {
 	}
 	result := make([]*machine, 0)
 	for _, m := range all {
-		if m.Parent() == hostSystemID {
+		// Compare the decoded parent directly: Parent() is intentionally
+		// LXD-only, while vm-hosts also back virsh guests.
+		if m.parentSystemID == hostSystemID {
 			result = append(result, m)
 		}
 	}

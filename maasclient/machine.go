@@ -403,12 +403,14 @@ func (m *machine) Delete(ctx context.Context) error {
 
 // MarkBroken marks the machine Broken with an optional comment.
 func (m *machine) MarkBroken(ctx context.Context, comment string) (Machine, error) {
-	m.params.Reset()
-	m.params.Set(Operation, OperationMarkBroken)
+	// Build the POST parameters locally: keeping op=mark_broken on the
+	// machine would turn a later Get into a GET for a POST-only operation.
+	params := ParamsBuilder().Set(Operation, OperationMarkBroken)
 	if comment != "" {
-		m.params.Set(CommentKey, comment)
+		params.Set(CommentKey, comment)
 	}
-	res, err := m.client.Post(ctx, m.apiPath, m.params.Values())
+	m.params.Reset()
+	res, err := m.client.Post(ctx, m.apiPath, params.Values())
 	if err != nil {
 		return m, err
 	}
